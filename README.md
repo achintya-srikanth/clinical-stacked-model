@@ -27,7 +27,7 @@ The pipeline outputs an interactive dashboard displaying your model's trust brea
 
 ├── preprocess_eda.ipynb      # Stage 1: EHR data cleaning, leakage filtering, and feature extraction<br>
 ├── modeling.ipynb            # Stage 2: Stacking Super Learner, RSF training, and visual dashboard generation<br>
-├── report.docx            # Detailed Report<br>
+├── report.pdf            # Detailed Report<br>
 ├── readmissions_pipeline_dashboard.png   <br>
 └── README.md                 # Strategic project summary and technical documentation
 
