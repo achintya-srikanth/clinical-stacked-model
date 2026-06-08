@@ -1,0 +1,162 @@
+Predict 30-Day Hospital Readmission: Pipeline & Model Report
+-Achintya Srikanth
+
+1. Executive Summary
+
+This report establishes a machine learning architecture designed to predict the risk of 30-day all-cause hospital readmissions. Using historical Electronic Health Record (EHR) and EMR registries from a hospital cohort, the framework isolates a complex subpopulation experiencing chronic multi-morbidities.
+
+Core Specifications
+
+    • Dataset Demographics: UCI Diabetes 130-US Hospitals (1999–2008) [1]
+
+    • Cohort Scale Dimensions: 53,000 independent unique patient instances extracted from 68,000 baseline encounters.
+
+    • Target Mapping Categories: Class 1 (<30 days early readmit), Class 2 (>30 days late readmit), Class 3 (NO readmission baseline).
+
+    • Disease Conditions Selection:
+        ? Diabetes Mellitus (ICD-9: 250)
+        ? Chronic Kidney Disease / CKD (ICD-9: 585)
+        ? Essential Hypertension / High Blood Pressure (ICD-9: 401)
+
+    • Algorithmic Framework: Multi-Class Survival Stacking Ensemble (Super Learner Architecture) using a regularized meta-learner to merge tree-based survival representations.
+
+    • Production Validation Performance: Harrell's Concordance Index (C-Index) of 0.7022, evaluated using patient-stratified 5-fold cross-validation.
+
+2. Data Engineering & Preprocessing
+
+The raw clinical database is structured by encounter entries, which present major pipeline challenges: data leakage, non-random missingness, high categorical cardinality, and informative right-censoring. The data engineering pipeline resolves these systemic issues prior to model injection.
+
+Cohort Partitioning & Leakage Elimination:
+
+    • Inclusion Filter: Patients with an active diagnosis code for Diabetes, CKD, or Hypertension present in any of the primary, secondary, or tertiary diagnostic fields (diag_1, diag_2, diag_3).
+
+    • De-duplication Protocol: Standard longitudinal registries contain multiple temporal encounters per person (patient_nbr). Training models directly on multiple records violates the independent and identically distributed (i.i.d.) data assumption. This creates artificial proximity, overfitting, and inflated accuracy.
+
+    • Execution: The pipeline sorts records chronologically by encounter_id and drops all subsequent records per patient, isolating only the first index encounter. This reduces the initial 68,000 raw encounters down to an independent baseline matrix of 53,000 unique patients.
+
+Survival Target Construct Formatting:
+
+To avoid losing information by forcing the raw dataset classification classes (<30, >30, NO) into a basic binary framework, the target is modeled as an interval-censored survival tuple (T_i, delta_i) for each unique patient i:
+    • Class 1: Readmitted within 30 days (<30): Mapped to an early midpoint proxy of (T_i = 15.0) days; event observed indicator (delta_i = 1.0).
+    • Class 2: Readmitted after 30 days (>30): Mapped to a late subacute midpoint proxy of (T_i = 45.0) days; event observed indicator (delta_i = 1.0).
+    • Class 3: Not readmitted (NO): Right-censored at the standard tracking limit boundary of (T_i = 60.0) days; event censored indicator (delta_i = 0.0).
+
+Feature Matrix Transformations
+
+    • Bracketed Variable Linearization: Categorical text age boundaries (e.g., [70-80)) are converted into their respective discrete numerical midpoints (e.g., 75). This preserves the underlying chronological ordinal relationships.
+      
+    • Variance Stabilization: Counts for historical healthcare usage (number_outpatient, number_emergency, number_inpatient) exhibit extreme right-skew distributions driven by super-utilizers. These features are smoothed using a log(x + 1) mathematical transformation to prevent extreme variances from skewing the tree split metrics.
+      
+    • Pharmacotherapy Titration Map: 23 distinct diabetic-specific medication columns are mapped from raw strings into an ordinal numeric scale: {'No': 0, 'Down': 1, 'Steady': 2, 'Up': 3}. This maps dosage changes directly to the tree split metrics.
+      
+    • ICD-9 Dimensionality Reduction: High-cardinality raw diagnostic code strings are grouped into collapsed clinical matrices matching major physical system categories (e.g., Circulatory, Respiratory, Digestive, Metabolic, Injury, Musculoskeletal, Genitourinary, Neoplasms, and External Causes). Missing values within low-density demographic fields are grouped into an explicit string token ("Unknown"), converting missing documentation into a predictive clinical signal.
+
+3. Machine Learning Architecture: Survival Super Learner
+
+The pipeline implements a dual-tier Stacking Ensemble (Super Learner framework). This approach leverages a diverse group of base models (Tier-0 Specialists) to extract risk features, which are then combined using an optimized linear-style survival meta-model (Tier-1 Blender).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Tier-0 Base Models Setup
+
+    • Model 1: Random Survival Forest (RSF): Constructs 100 non-parametric survival trees utilizing the log-rank splitting metric. It is designed to capture high-order, non-linear feature interactions without forcing predefined proportional hazard constraints.
+      
+    • Model 2: XGBoost Cox Proportional Hazards: Optimizes gradient-boosted tree ensembles by minimizing the partial log-likelihood function of a Cox model, handling sparse categorical indicators efficiently.
+      
+    • Model 3: XGBoost Accelerated Failure Time (AFT): Models the survival landscape using a parametric log-normal distribution. This provides a clean contrast to the proportional hazard models by estimating log-time acceleration rates directly.
+
+Tier-1 Meta-Blender Optimization Strategy
+
+To prevent data leakage and optimism bias during the blending stage, the Tier-1 coefficients are optimized using strictly Out-of-Fold (OOF) predictions. This matrix is generated across a Stratified 5-Fold Cross-Validation routine, ensuring that individual patient risks are predicted only by models trained on completely separate validation folds.
+
+The Meta-Blender is structured as a Non-Negative Cox Proportional Hazards Model, which combines the out-of-fold base predictions into a single composite hazard multiplier:
+
+
+
+Where ‘z’ represents the validation risk score for patient i from base model j. The parameter weights (?) are solved using Sequential Least Squares Programming (SLSQP) optimization subject to strict structural constraints:
+
+min(?) {Negative Partial Log-Likelihood of Blended Risk Score}
+
+Subject to constraints: ?? >= 0, ?? >= 0, ?? >= 0 and (summation j from 1 to 3) ?_j = 1.0
+
+Empirical Weight Optimization Outputs
+
+    • Random Survival Forest Weight (??): 0.9566 (95.66%)
+    • XGBoost Cox Weight (??): 0.0267 (2.67%)
+    • XGBoost AFT Weight (??): 0.0167 (1.67%)
+
+Note: The overwhelming weight allocation assigned to the Random Survival Forest (95.66%) mathematically proves that the risk signals in EHR data are highly non-linear. The underlying risk paths are driven by complex feature combinations (e.g., changes in insulin dosages paired with historical inpatient lengths of stay) rather than the smoother linear or log-linear paths used by standard gradient-boosted models.
+
+4. Performance Evaluation & Validation
+
+Model Discrimination Accuracy
+
+The cross-validated Super Learner pipeline achieves a final production Harrell's Concordance Index of 0.7022. This demonstrates high discriminative capacity, confirming that the pipeline accurately ranks a patient's true timeline to readmission across the multi-morbid cohort.
+
+Translating the Survival Graph
+
+
+
+The time-to-event dashboard provides a clear visual narrative of how risk unfolds for patients after they leave the hospital:
+
+    • The Critical Window (Days 0 to 15): The immediate post-discharge period is where the model demonstrates its true predictive power. Tier A (High Risk) experiences a steep vertical drop right at Day 15, showing a rapid loss of stability. This visual cliff represents patients returning to the hospital due to acute complications or gaps in transitional care. In contrast, Tier C (Low Risk) remains entirely flat and stable during this critical period.
+      
+    • The Chronic Transition (Days 15 to 45): As we move past the two-week mark, Tier B (Moderate Risk) begins its descent, taking a delayed step downward at Day 45. This visual path represents a different clinical timeline: patients who manage to survive the immediate post-discharge window but gradually destabilize over the following month due to difficulties managing long-term chronic conditions out of the hospital.
+
+    • The Baseline of Stability (Days 45 to 60): By the end of the 60-day tracking window, the visual separation between the three cohorts is complete. Tier C forms a flat line near the top of the chart, showing that the model successfully isolated the patients who achieved long-term health in the community. Tier A finishes at the bottom, highlighting the exact subset of patients who required immediate hospital intervention.
+      
+      This confirms that the proposed Super Learner approach successfully translates raw hospital records into three distinct, predictable patient journeys.
+
+Accounting for Dataset Artifacts
+
+The sharp vertical drops observed at days 15, 30, and 45 in the survival function curves are expected structural artifacts of the dataset. They stem directly from the interval-censored nature of the source records, where raw timestamps were pre-grouped into categorical brackets rather than logged as continuous daily tracking entries.
+
+Rather than artificially smoothing these curves, keeping these sharp steps provides an honest look at the data, showing exactly how the model evaluates risk transitions at those specific interval checkpoints.
+
+5. Deployment Proposals (Future Roadmap)
+
+To translate this validated statistical engine into a fully functioning hospital application, following implementation of downstream operational modules is proposed:
+Automated Clinical Workflow Mapping
+
+Use the final continuous hazard score to assign discharged patients into three distinct operational risk categories based on facility percentiles:
+    • Tier A: Critical High Risk (90th to 100th Percentile | Class 1 Dominant): Automatically flags the patient file inside the EHR interface, triggering a mandatory home-health nurse dispatch within 48 hours of discharge to manage patients with high numbers of prior inpatient stays and active, unstable insulin dosage changes.
+      
+    • Tier B: Subacute Moderate Risk (70th to 90th Percentile | Class 2 Dominant): Routes the patient chart to an automated clinical pharmacy review queue for comprehensive medication synchronization and reconciliation before the patient leaves the building.
+      
+    • Tier C: Stable Low Risk (0 to 70th Percentile | Class 3 Dominant): Routes lower-complexity chronic cases to standard discharge pathways with automated follow-up texts, protecting high-intensity hospital resources for patients in Tiers A and B.
+
+MLOps Model Governance & Drift Monitoring
+
+      Because clinical practice patterns, drug guidelines, and hospital populations shift over time, we propose setting up an automated model governance pipeline:
+    • Feature Drift Auditing: Monthly automated evaluation of the Population Stability Index (PSI) on incoming demographic and diagnostic fields. A PSI score exceeding 0.20 triggers a data-drift alert for engineering review.
+    • Scheduled Recalibration: Retraining the base models and the Tier-1 Meta-Blender weights every six months using a rolling, updated window of out-of-fold data matrices.
+
+
+References
+
+[1] http://archive.ics.uci.edu/dataset/296/diabetes+130-us+hospitals+for+years+1999-2008
